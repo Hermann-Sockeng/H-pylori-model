@@ -1,5 +1,7 @@
 # Within-host model of H. pylori with dynamic gastric pH
 
+[![DOI](https://zenodo.org/badge/1164469283.svg)](https://doi.org/10.5281/zenodo.18739168)
+
 This repository contains the Python implementation of the mathematical model described in the article:
 
 > *Modeling the Impact of Dynamic Gastric pH on Helicobacter pylori Eradication and the Emergence of Antibiotic Resistance*
