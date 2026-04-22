@@ -1,8 +1,44 @@
 import numpy as np
 
+# ============================================================================
+# Standalone dietary perturbation functions
+# ============================================================================
+
+def gamma_diet_tilde(t, meal_times, gamma_diet_vals, lambda_decay, scale_H, n_days=30):
+    """
+    Non-dimensional dietary perturbation at time t.
+    Returns dimensionless value (already divided by scale_H).
+    """
+    total = 0.0
+    for day in range(n_days):
+        for i, mt in enumerate(meal_times):
+            t_meal = day + mt
+            if t >= t_meal:
+                total += gamma_diet_vals[i] * np.exp(-lambda_decay * (t - t_meal))
+    return total / scale_H
+
+
+def compute_average_gamma(meal_times, gamma_diet_vals, lambda_decay, scale_H):
+    """
+    Compute the time-average of gamma_diet_tilde over one period (1 day).
+    
+    Analytical formula for a single meal at time t_i:
+        avg_i = (gamma_i / lambda_decay) * (1 - exp(-lambda_decay * (1 - t_i))) / scale_H
+    
+    The total average is the sum over all meals.
+    """
+    total_avg = 0.0
+    for i, mt in enumerate(meal_times):
+        # Contribution from meal i
+        avg_i = (gamma_diet_vals[i] / lambda_decay) * (1.0 - np.exp(-lambda_decay * (1.0 - mt)))
+        total_avg += avg_i
+    return total_avg / scale_H
+
+
 def setup_model(params):
     """Return all model functions for a given parameter set."""
-    # Extract parameters 
+    
+    # Extract parameters
     beta_S_max = params['beta_S_max']
     beta_R_max = params['beta_R_max']
     K = params['K']
@@ -29,12 +65,12 @@ def setup_model(params):
     lambda_decay = params['lambda_decay']
     meal_times = params['meal_times']
 
-    # Non‑dimensional scaling
+    # Non-dimensional scaling
     scale_H = H_max - H_0
     nu_i_tilde = nu_i / M_i
     mu_i_tilde = mu * M_i
-    eta_tilde = eta * K               # σ in paper
-    gamma_tilde = gamma_immune * phi * K   # φ in paper
+    eta_tilde = eta * K               # σ in the paper
+    gamma_tilde = gamma_immune * phi * K   # φ in the paper
     zeta_tilde = zeta
     Delta_S = delta_S + zeta_tilde
     Delta_R = delta_R + zeta_tilde
@@ -42,7 +78,13 @@ def setup_model(params):
     beta_tilde = beta_acid
     M = np.sum(mu_i_tilde)
 
-    # pH‑dependent functions
+    # Compute constant average dietary perturbation
+    gamma_avg = compute_average_gamma(meal_times, gamma_diet_vals, lambda_decay, scale_H)
+
+    # ========================================================================
+    # pH-dependent functions
+    # ========================================================================
+    
     def H_from_h(h):
         return H_0 + scale_H * h
 
@@ -62,6 +104,7 @@ def setup_model(params):
         return kappa_i0 * np.exp(-0.5 * arg**2)
 
     def Q(h, d1, d2, d3):
+        """Composite antibiotic pressure function"""
         kvals = kappa_i(h)
         total = 0
         for i, d in enumerate([d1, d2, d3]):
@@ -70,6 +113,7 @@ def setup_model(params):
         return total
 
     def reproductive_numbers(h):
+        """Calculate pH-dependent reproductive numbers (at equilibrium d_i=1)"""
         d_eq = 1.0
         k_eq = kappa_i(h)
         Q_eq = 0
@@ -81,6 +125,7 @@ def setup_model(params):
         return R_s, R_r
 
     def R_r_sigma_threshold(h):
+        """Calculate R_r^σ threshold: (1 + σ/β_S) / (1/R_s + σ/β_S)"""
         R_s_val, _ = reproductive_numbers(h)
         betaS = beta_S(h)
         sigma = eta_tilde
@@ -91,6 +136,7 @@ def setup_model(params):
         return np.inf
 
     def R_r_phi_threshold(h):
+        """Calculate R_r^φ threshold: 1 / (1 - r0_tilde * (1 + φ/β_R))"""
         _, R_r_val = reproductive_numbers(h)
         betaS = beta_S(h)
         betaR = beta_R(h)
@@ -108,44 +154,89 @@ def setup_model(params):
                 return np.inf if denom > 0 else -np.inf
         return np.inf
 
-    # Dietary perturbation
-    def gamma_diet_tilde(t, n_days=30):
-        total = 0
-        for day in range(n_days):
-            for i, mt in enumerate(meal_times):
-                t_meal = day + mt
-                if t >= t_meal:
-                    total += gamma_diet_vals[i] * np.exp(-lambda_decay * (t - t_meal))
-        return total / scale_H
+    # ========================================================================
+    # ODE systems: time-dependent vs constant average diet
+    # ========================================================================
 
-    # ODE system
-    def model(t, y):
+    def model_time_dependent(t, y):
+        """Full non-autonomous model with time-dependent dietary perturbation"""
         s, r, g, d1, d2, d3, h = y
+        
         betaS = beta_S(h)
         betaR = beta_R(h)
         Qval = Q(h, d1, d2, d3)
 
         ds = (betaS * s * (1 - (s + r)) - Qval * s -
               eta_tilde * s * r - gamma_tilde * g * s - Delta_S * s)
+        
         dr = (betaR * r * (1 - (s + r)) + M * s +
               eta_tilde * s * r - gamma_tilde * g * r - Delta_R * r)
+        
         if s + r > 1e-10:
             dg = rho * g * (1 - g / (s + r))
         else:
             dg = -rho * g
+        
         dd1 = tau_i[0] * (1 - d1)
         dd2 = tau_i[1] * (1 - d2)
         dd3 = tau_i[2] * (1 - d3)
-        dh = (alpha_tilde * (s + r) * (1 - h) - beta_tilde * h + gamma_diet_tilde(t))
+        
+        # Time-dependent diet
+        dh = (alpha_tilde * (s + r) * (1 - h) - beta_tilde * h +
+              gamma_diet_tilde(t, meal_times, gamma_diet_vals, lambda_decay, scale_H))
+        
         return [ds, dr, dg, dd1, dd2, dd3, dh]
 
+    def model_constant_diet(t, y):
+        """Autonomous model with constant average dietary perturbation"""
+        s, r, g, d1, d2, d3, h = y
+        
+        betaS = beta_S(h)
+        betaR = beta_R(h)
+        Qval = Q(h, d1, d2, d3)
+
+        ds = (betaS * s * (1 - (s + r)) - Qval * s -
+              eta_tilde * s * r - gamma_tilde * g * s - Delta_S * s)
+        
+        dr = (betaR * r * (1 - (s + r)) + M * s +
+              eta_tilde * s * r - gamma_tilde * g * r - Delta_R * r)
+        
+        if s + r > 1e-10:
+            dg = rho * g * (1 - g / (s + r))
+        else:
+            dg = -rho * g
+        
+        dd1 = tau_i[0] * (1 - d1)
+        dd2 = tau_i[1] * (1 - d2)
+        dd3 = tau_i[2] * (1 - d3)
+        
+        # Constant average diet
+        dh = (alpha_tilde * (s + r) * (1 - h) - beta_tilde * h + gamma_avg)
+        
+        return [ds, dr, dg, dd1, dd2, dd3, dh]
+
+    # ========================================================================
+    # Return all functions and parameters
+    # ========================================================================
+    
     return {
-        'model': model,
+        'model_time_dependent': model_time_dependent,
+        'model_constant_diet': model_constant_diet,
         'H_from_h': H_from_h,
+        'beta_S': beta_S,
+        'beta_R': beta_R,
+        'kappa_i': kappa_i,
         'reproductive_numbers': reproductive_numbers,
         'R_r_sigma_threshold': R_r_sigma_threshold,
         'R_r_phi_threshold': R_r_phi_threshold,
+        'alpha_tilde': alpha_tilde,
+        'beta_tilde': beta_tilde,
+        'gamma_tilde': gamma_tilde,
+        'eta_tilde': eta_tilde,
+        'Delta_S': Delta_S,
+        'Delta_R': Delta_R,
         'scale_H': scale_H,
+        'gamma_avg': gamma_avg,
         'H_0': H_0,
         'H_max': H_max,
         'H_opt': H_opt,
